@@ -1,0 +1,208 @@
+
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zeiterfassung</title>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      max-width: 600px;
+      margin: 0 auto;
+      padding: 20px;
+      text-align: center;
+      background: #ffffff;
+      color: #111111;
+    }
+
+    h1 {
+      font-size: 36px;
+      line-height: 1.15;
+      margin: 12px 0 24px;
+    }
+
+    p {
+      font-size: 25px;
+      line-height: 1.4;
+    }
+
+    button {
+      width: 100%;
+      min-height: 100px;
+      padding: 22px 12px;
+      margin: 12px 0;
+      font-size: 34px;
+      font-weight: 900;
+      border: 3px solid #111111;
+      border-radius: 16px;
+      cursor: pointer;
+    }
+
+    #eingang {
+      background: #16803c;
+      color: white;
+    }
+
+    #ausgang {
+      background: #c62828;
+      color: white;
+    }
+
+    #neustart {
+      background: #eeeeee;
+      color: #111111;
+    }
+
+    button:disabled {
+      opacity: 0.55;
+    }
+
+    #meldung {
+      font-size: 27px;
+      font-weight: bold;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+      padding: 16px 4px;
+    }
+
+    #reader {
+      width: 100%;
+      margin: 20px auto;
+    }
+
+    #neustart[hidden] {
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Zeiterfassung<br><small style="font-size:16px;color:#888;font-weight:normal">Version 1.2</small></h1>
+
+  <p>1. Bitte Bewegung auswählen</p>
+
+  <button id="eingang">EINGANG</button>
+  <button id="ausgang">AUSGANG</button>
+
+  <p id="meldung" aria-live="polite">
+    Bitte EINGANG oder AUSGANG auswählen.
+  </p>
+
+  <div id="reader"></div>
+
+  <button id="neustart" hidden>NEUER EINTRAG</button>
+
+  <script>
+    // Version 1.2: hier die /exec-URL der Web-App aus "CZ_Zeiterfassung v1.2" einfügen
+    const URL_APPS_SCRIPT = 'WEB_APP_URL_HIER_EINFUEGEN';
+
+    const meldung = document.getElementById('meldung');
+    const buttonEingang = document.getElementById('eingang');
+    const buttonAusgang = document.getElementById('ausgang');
+    const buttonNeustart = document.getElementById('neustart');
+
+    let lector = null;
+    let verarbeitung = false;
+    let standort = null;          // GPS-Standort des Handys
+
+    buttonEingang.addEventListener('click', () => starten('Eingang'));
+    buttonAusgang.addEventListener('click', () => starten('Ausgang'));
+    buttonNeustart.addEventListener('click', () => location.reload());
+
+    // Standort wird während des Scannens abgefragt
+    function standortHolen() {
+      return new Promise((resolve) => {
+        if (!navigator.geolocation) return resolve(null);
+        navigator.geolocation.getCurrentPosition(
+          (pos) => resolve(pos.coords),
+          () => resolve(null),
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+        );
+      });
+    }
+
+    async function starten(typ) {
+      if (lector || verarbeitung) return;
+
+      buttonEingang.disabled = true;
+      buttonAusgang.disabled = true;
+
+      const standortPromise = standortHolen().then((c) => (standort = c));
+
+      meldung.textContent =
+        typ.toUpperCase() + ': Bitte QR-Code scannen.';
+
+      try {
+        lector = new Html5Qrcode('reader');
+
+        await lector.start(
+          { facingMode: 'environment' },
+          { fps: 10, qrbox: { width: 230, height: 230 } },
+
+          async (code) => {
+            if (verarbeitung) return;
+            verarbeitung = true;
+
+            meldung.textContent =
+              'Bitte warten... ' + typ.toUpperCase() +
+              ' wird registriert.';
+
+            try {
+              await lector.stop();
+              await standortPromise;
+
+              const url = URL_APPS_SCRIPT +
+                '?codigo=' + encodeURIComponent(code.trim()) +
+                '&tipo=' + encodeURIComponent(typ) +
+                '&lat=' + (standort ? standort.latitude : '') +
+                '&lng=' + (standort ? standort.longitude : '') +
+                '&prec=' + (standort ? Math.round(standort.accuracy) : '') +
+                '&disp=' + encodeURIComponent(navigator.userAgent.slice(0, 150)) +
+                '&t=' + Date.now();
+
+              try {
+                const antwort = await fetch(url, { redirect: 'follow' });
+                const res = await antwort.json();
+                meldung.textContent = res.ok
+                  ? '✅ ' + (res.name || '') + ' — ' + res.meldung
+                  : '❌ ' + res.meldung;
+              } catch (e) {
+                // Falls der Browser die Antwort blockiert, wird trotzdem gesendet
+                await fetch(url, { method: 'GET', mode: 'no-cors', redirect: 'follow' });
+                meldung.textContent =
+                  'ANFRAGE GESENDET: ' + typ.toUpperCase() +
+                  '. Bitte Registrierung prüfen.';
+              }
+
+              if (!standort) {
+                meldung.textContent += ' (Ohne Standort: bitte GPS erlauben)';
+              }
+
+            } catch (error) {
+              meldung.textContent =
+                'FEHLER: Bitte erneut versuchen. ' + error.message;
+            }
+
+            buttonNeustart.hidden = false;
+          }
+        );
+
+      } catch (error) {
+        meldung.textContent =
+          'KAMERA-FEHLER: ' + error.message;
+
+        buttonEingang.disabled = false;
+        buttonAusgang.disabled = false;
+        lector = null;
+      }
+    }
+  </script>
+</body>
+</html>
